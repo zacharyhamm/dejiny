@@ -87,7 +87,14 @@ fn summarize_impl(id: i64) -> anyhow::Result<()> {
         }
 
         let child = Command::new("claude")
-            .args(["-p", "--model", "sonnet", "--output-format", "text"])
+            .args([
+                "-p",
+                "--no-session-persistence",
+                "--model",
+                "sonnet",
+                "--output-format",
+                "text",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
