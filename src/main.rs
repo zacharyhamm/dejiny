@@ -39,7 +39,10 @@ enum Commands {
         cwd: String,
     },
     /// Fuzzy search command history
-    Search,
+    Search {
+        /// Initial search query (pre-populated from shell input)
+        query: Option<String>,
+    },
     /// Record a command's terminal session
     Record {
         /// Command to run (passed to $SHELL -c)
@@ -107,7 +110,7 @@ fn main() {
             end,
             cwd,
         } => store::store(&command, exit_code, &start, &end, &cwd),
-        Commands::Search => search::search(),
+        Commands::Search { query } => search::search(query),
         Commands::Record { command } => record::record(&command),
         Commands::Replay { id, speed, text } => replay::replay(id, speed, text),
         Commands::Summarize { id } => summarize::summarize(id),

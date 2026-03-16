@@ -25,7 +25,7 @@ enum FocusedPanel {
     Summary,
 }
 
-pub fn search() {
+pub fn search(initial_query: Option<String>) {
     if !history_path().join("history.db").exists() {
         return;
     }
@@ -38,7 +38,7 @@ pub fn search() {
         return;
     }
 
-    match run_tui(&entries) {
+    match run_tui(&entries, initial_query) {
         Ok(Some(SearchAction::Run(cmd))) => print!("{cmd}"),
         Ok(Some(SearchAction::Replay(id))) => print!("__DEJINY_REPLAY__{id}"),
         Ok(None) => {}
@@ -188,13 +188,20 @@ impl Drop for TuiGuard {
     }
 }
 
-fn run_tui(entries: &[HistoryEntry]) -> anyhow::Result<Option<SearchAction>> {
+fn run_tui(entries: &[HistoryEntry], initial_query: Option<String>) -> anyhow::Result<Option<SearchAction>> {
     let _guard = TuiGuard::new()?;
 
     let backend = CrosstermBackend::new(std::io::stderr());
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = SearchState::new(entries.to_vec());
+
+    if let Some(query) = initial_query {
+        if !query.is_empty() {
+            state.input = query;
+            state.refilter();
+        }
+    }
 
     // Drain any buffered input (e.g. leftover bytes from the Ctrl+R keypress).
     while event::poll(std::time::Duration::from_millis(INPUT_DRAIN_TIMEOUT_MS))? {

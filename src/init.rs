@@ -75,7 +75,7 @@ zle -N accept-line __dejiny_accept_line
 
 __dejiny_search_widget() {
     local selected
-    selected="$(dejiny search </dev/tty)"
+    selected="$(dejiny search -- "$BUFFER" </dev/tty)"
     if [[ "$selected" == __DEJINY_REPLAY__* ]]; then
         BUFFER="dejiny replay ${selected#__DEJINY_REPLAY__}"
         zle accept-line
@@ -127,7 +127,7 @@ __dejiny_precmd() {
 
 __dejiny_search_widget() {
     local selected
-    selected="$(dejiny search </dev/tty)"
+    selected="$(dejiny search -- "$READLINE_LINE" </dev/tty)"
     if [[ "$selected" == __DEJINY_REPLAY__* ]]; then
         READLINE_LINE="dejiny replay ${selected#__DEJINY_REPLAY__}"
         READLINE_POINT=${#READLINE_LINE}
