@@ -1,4 +1,5 @@
 use crate::db::open_db;
+use rusqlite::TransactionBehavior;
 use std::fs;
 use std::path::PathBuf;
 
@@ -69,13 +70,20 @@ pub fn import(zsh_path: Option<PathBuf>, bash_path: Option<PathBuf>, dry_run: bo
         return;
     }
 
-    let conn = match open_db() {
+    let mut conn = match open_db() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("dejiny: failed to open database: {e}");
             return;
         }
     };
+
+    // Use a longer busy timeout for import since it holds the lock for a while
+    // and the shell hook may be competing for writes.
+    if let Err(e) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
+        eprintln!("dejiny: failed to set busy timeout: {e}");
+        return;
+    }
 
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
@@ -84,8 +92,10 @@ pub fn import(zsh_path: Option<PathBuf>, bash_path: Option<PathBuf>, dry_run: bo
     let mut imported = 0u64;
     let mut skipped = 0u64;
 
-    // Use a transaction for performance
-    let tx = match conn.unchecked_transaction() {
+    // Use an IMMEDIATE transaction to acquire the write lock upfront rather than
+    // failing with "database is locked" on individual inserts when the shell hook
+    // is competing for writes.
+    let tx = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("dejiny: failed to begin transaction: {e}");
