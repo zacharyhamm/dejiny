@@ -4,11 +4,6 @@ A shell history manager that records terminal sessions and lets you search and r
 
 dejiny stores every command you run in a SQLite database along with its exit code, working directory, hostname, and timestamps. When recording is enabled, it also captures the full terminal output so you can replay sessions later. Recordings are compressed with zstd and stored in chunks. An optional summarization feature uses Claude to generate short descriptions of recorded sessions.
 
-## Requirements
-
-- Rust (2024 edition)
-- Bash or Zsh
-
 ## Installation
 
 ```
@@ -17,7 +12,7 @@ cargo install --path .
 
 ## Shell setup
 
-Add one of the following to your shell configuration file:
+Add the following to your shell configuration file:
 
 **Zsh** (`~/.zshrc`):
 ```zsh
@@ -25,6 +20,8 @@ eval "$(dejiny init zsh)"
 ```
 
 This installs hooks that automatically store each command after it runs and binds `Ctrl+R` to the interactive search UI.
+
+An init script also exists for `bash`, but I have not tested it yet, and have no idea if it works as expected. YMMV.
 
 ## Recording terminal sessions
 
