@@ -199,12 +199,11 @@ fn run_tui(
 
     let mut state = SearchState::new(entries.to_vec());
 
-    if let Some(query) = initial_query {
-        if !query.is_empty() {
+    if let Some(query) = initial_query
+        && !query.is_empty() {
             state.input = query;
             state.refilter();
         }
-    }
 
     // Drain any buffered input (e.g. leftover bytes from the Ctrl+R keypress).
     while event::poll(std::time::Duration::from_millis(INPUT_DRAIN_TIMEOUT_MS))? {
