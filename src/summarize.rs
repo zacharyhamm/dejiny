@@ -5,7 +5,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-const MAX_TEXT_BYTES: usize = 200_000;
+const MAX_TEXT_BYTES: usize = 262_144; // 256 KB
+const HALF_WINDOW: usize = MAX_TEXT_BYTES / 2; // 128 KB
 
 pub fn spawn_summarize(command_id: i64) {
     if std::env::var_os("DEJINY_NO_SUMMARY").is_some() {
@@ -44,14 +45,19 @@ fn summarize_impl(id: i64) -> anyhow::Result<()> {
     let rec = load_recording(&conn, id)?;
 
     let mut text = clean_text(&rec.concatenate_event_data());
-    if text.len() > MAX_TEXT_BYTES {
-        // Truncate at a char boundary
-        let mut end = MAX_TEXT_BYTES;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
+    let was_split = text.len() > MAX_TEXT_BYTES;
+    if was_split {
+        let mut first_end = HALF_WINDOW;
+        while first_end > 0 && !text.is_char_boundary(first_end) {
+            first_end -= 1;
         }
-        text.truncate(end);
-        text.push_str("\n... [truncated]");
+        let mut last_start = text.len() - HALF_WINDOW;
+        while last_start < text.len() && !text.is_char_boundary(last_start) {
+            last_start += 1;
+        }
+        let first = &text[..first_end];
+        let last = &text[last_start..];
+        text = format!("{first}\n\n... [middle of output omitted] ...\n\n{last}");
     }
 
     // Build prompt
@@ -59,6 +65,13 @@ fn summarize_impl(id: i64) -> anyhow::Result<()> {
         "Summarize this terminal recording in a concise but detailed way. Limit to 5 or 6 sentences. \
          Focus on what command was run, what it did, and whether it succeeded.\n\n",
     );
+    if was_split {
+        prompt.push_str(
+            "Note: The terminal output was too large to include in full. \
+             The text below contains the BEGINNING of the session output, followed by the END. \
+             The middle portion has been omitted.\n\n",
+        );
+    }
     if let Some(ref meta) = meta {
         let duration = meta.end - meta.start;
         prompt.push_str(&format!("# Command: {}\n", meta.command));
