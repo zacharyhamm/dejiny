@@ -1,6 +1,8 @@
 use dejiny::db::open_db_at;
 use dejiny::format::build_recording;
 use rusqlite::Connection;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -488,4 +490,160 @@ fn text_complex_escapes() {
     assert!(stdout.contains("blue"), "expected 'blue' text");
     assert!(!stdout.contains("\x1b["), "should have no ANSI escapes");
     assert!(!stdout.contains("\x07"), "should have no BEL character");
+}
+
+// ---------------------------------------------------------------------------
+// Resize propagation test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resize_propagation() {
+    use nix::poll::PollTimeout;
+    use nix::pty::forkpty;
+    use nix::sys::signal::{Signal, kill};
+    use nix::sys::wait::{WaitPidFlag, waitpid};
+
+    let tmp = TempDir::new().unwrap();
+
+    // Write helper script that traps SIGWINCH and reports terminal size.
+    let script_path = tmp.path().join("resize_test.sh");
+    std::fs::write(
+        &script_path,
+        "#!/bin/bash\ntrap 'echo RESIZED:$(stty size)' WINCH\necho READY:$(stty size)\nsleep 5\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &script_path,
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    // Initial window size: 24 rows x 80 cols
+    let initial_ws = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    // forkpty with initial size
+    let fork_result = unsafe { forkpty(Some(&initial_ws), None) }.expect("forkpty failed");
+
+    match fork_result {
+        nix::pty::ForkptyResult::Child => {
+            // Child: exec dejiny record wrapping the test script.
+            // Set XDG_DATA_HOME so dejiny stores its DB in the temp dir.
+            let xdg_data = tmp.path().to_str().unwrap();
+            // SAFETY: we are in the child process after fork, single-threaded.
+            unsafe {
+                std::env::set_var("XDG_DATA_HOME", xdg_data);
+                std::env::set_var("DEJINY_NO_SUMMARIZE", "1");
+            }
+
+            let dejiny = PathBuf::from(env!("CARGO_BIN_EXE_dejiny"));
+            let c_dejiny =
+                std::ffi::CString::new(dejiny.to_str().unwrap()).unwrap();
+            let c_record = std::ffi::CString::new("record").unwrap();
+            let c_sep = std::ffi::CString::new("--").unwrap();
+            let c_script =
+                std::ffi::CString::new(script_path.to_str().unwrap()).unwrap();
+            let _ = nix::unistd::execvp(
+                &c_dejiny,
+                &[&c_dejiny, &c_record, &c_sep, &c_script],
+            );
+            std::process::exit(1);
+        }
+        nix::pty::ForkptyResult::Parent { child, master } => {
+            // Set master fd to non-blocking for poll-based reading.
+            unsafe {
+                libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+            }
+
+            let mut collected = String::new();
+            let mut buf = [0u8; 4096];
+            let timeout = PollTimeout::from(5000u16); // 5 seconds
+
+            // Phase 1: Read until we see READY:24 80
+            let ready_found = poll_until_match(&master, &mut collected, &mut buf, timeout, "READY:24 80");
+            assert!(
+                ready_found,
+                "timed out waiting for READY:24 80, got: {collected}"
+            );
+
+            // Phase 2: Change window size to 50x120 on the outer master.
+            // TIOCSWINSZ stores the new size; we also send SIGWINCH
+            // explicitly to the child process group because on macOS the
+            // kernel does not always deliver SIGWINCH via the master fd
+            // ioctl alone in non-interactive PTY setups.
+            let new_ws = libc::winsize {
+                ws_row: 50,
+                ws_col: 120,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            unsafe {
+                libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &new_ws);
+            }
+            // Give the ioctl a moment to take effect, then ensure
+            // dejiny receives SIGWINCH so it reads the new size.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = kill(child, Signal::SIGWINCH);
+
+            // Phase 3: Read until we see RESIZED:50 120
+            let resized_found =
+                poll_until_match(&master, &mut collected, &mut buf, timeout, "RESIZED:50 120");
+            assert!(
+                resized_found,
+                "timed out waiting for RESIZED:50 120, got: {collected}"
+            );
+
+            // Cleanup: kill child and wait
+            let _ = kill(child, Signal::SIGKILL);
+            let _ = waitpid(child, Some(WaitPidFlag::empty()));
+        }
+    }
+}
+
+/// Poll the master fd until `collected` contains `needle` or timeout expires.
+/// Returns true if found, false on timeout.
+fn poll_until_match(
+    master: &impl AsRawFd,
+    collected: &mut String,
+    buf: &mut [u8],
+    _timeout: nix::poll::PollTimeout,
+    needle: &str,
+) -> bool {
+    use nix::poll::{PollFd, PollFlags, poll};
+    use std::os::fd::BorrowedFd;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
+    loop {
+        if collected.contains(needle) {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let poll_ms = remaining.as_millis().min(5000) as u16;
+
+        let borrowed = unsafe { BorrowedFd::borrow_raw(master.as_raw_fd()) };
+        let mut fds = [PollFd::new(borrowed, PollFlags::POLLIN)];
+        match poll(&mut fds, nix::poll::PollTimeout::from(poll_ms)) {
+            Ok(0) => continue, // timeout
+            Ok(_) => {
+                if let Some(revents) = fds[0].revents() {
+                    if revents.contains(PollFlags::POLLIN) {
+                        let n = unsafe { libc::read(master.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+                        if n > 0 {
+                            collected.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
+                        }
+                    }
+                }
+            }
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(e) => panic!("poll failed: {e}"),
+        }
+    }
 }

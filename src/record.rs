@@ -16,6 +16,9 @@ const SIGTSTP_TIMEOUT_MS: u64 = 100;
 /// Write end of the self-pipe used to wake poll() on SIGCHLD.
 static SIGCHLD_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 
+/// Write end of the self-pipe used to wake poll() on SIGWINCH.
+static SIGWINCH_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
+
 /// Check whether `data` contains a Ctrl+Z keystroke in any encoding:
 ///  - Legacy: raw 0x1A byte
 ///  - Kitty keyboard protocol: CSI 122 ; <modifiers> [:<event-type>] u
@@ -348,6 +351,27 @@ fn run_recording_session(
     );
     unsafe { sigaction(Signal::SIGCHLD, &sigchld_action)? };
 
+    // Self-pipe for SIGWINCH so poll() wakes on terminal resize.
+    let (sigwinch_pipe_rd, sigwinch_pipe_wr) = nix::unistd::pipe()?;
+    unsafe {
+        libc::fcntl(sigwinch_pipe_rd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+        libc::fcntl(sigwinch_pipe_wr.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    SIGWINCH_PIPE_WR.store(sigwinch_pipe_wr.as_raw_fd(), Ordering::SeqCst);
+
+    extern "C" fn sigwinch_handler(_: libc::c_int) {
+        let fd = SIGWINCH_PIPE_WR.load(Ordering::Relaxed);
+        if fd >= 0 {
+            unsafe { libc::write(fd, [0u8].as_ptr().cast(), 1) };
+        }
+    }
+    let sigwinch_action = SigAction::new(
+        SigHandler::Handler(sigwinch_handler),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    unsafe { sigaction(Signal::SIGWINCH, &sigwinch_action)? };
+
     // Ignore SIGTSTP for dejiny itself — the Ctrl+Z byte travels
     // through the PTY to the child; we handle suspension via waitpid.
     let sigtstp_ignore = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
@@ -396,8 +420,9 @@ fn run_recording_session(
 
     // Poll loop
     let stdin = std::io::stdin();
-    // SAFETY: sigchld_pipe_rd is valid for the lifetime of this scope.
+    // SAFETY: sigchld_pipe_rd and sigwinch_pipe_rd are valid for the lifetime of this scope.
     let sigchld_pipe_borrowed = unsafe { BorrowedFd::borrow_raw(sigchld_pipe_rd.as_raw_fd()) };
+    let sigwinch_pipe_borrowed = unsafe { BorrowedFd::borrow_raw(sigwinch_pipe_rd.as_raw_fd()) };
     let mut drain_buf = [0u8; 64];
     // Tracks a pending suspend: after sending SIGTSTP to a raw-mode
     // child, we give it this long to stop before escalating to SIGSTOP.
@@ -407,6 +432,7 @@ fn run_recording_session(
             PollFd::new(stdin.as_fd(), PollFlags::POLLIN),
             PollFd::new(master_fd.as_fd(), PollFlags::POLLIN),
             PollFd::new(sigchld_pipe_borrowed, PollFlags::POLLIN),
+            PollFd::new(sigwinch_pipe_borrowed, PollFlags::POLLIN),
         ];
 
         let timeout = match suspend_deadline {
@@ -476,6 +502,18 @@ fn run_recording_session(
             }
         }
 
+        // Self-pipe readable → SIGWINCH was delivered. Propagate new size to child PTY.
+        if let Some(revents) = fds[3].revents()
+            && revents.contains(PollFlags::POLLIN)
+        {
+            while nix::unistd::read(&sigwinch_pipe_rd, &mut drain_buf).unwrap_or(0) > 0 {}
+            let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+            if unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 {
+                unsafe { libc::ioctl(master_fd.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+                log::debug!("sigwinch: propagated {}x{} to child PTY", ws.ws_col, ws.ws_row);
+            }
+        }
+
         // Check master fd (output from child)
         if let Some(revents) = fds[1].revents() {
             if revents.contains(PollFlags::POLLIN) {
@@ -540,13 +578,17 @@ fn run_recording_session(
         }
     }
 
-    // Disarm self-pipe and restore signal dispositions.
+    // Disarm self-pipes and restore signal dispositions.
     SIGCHLD_PIPE_WR.store(-1, Ordering::SeqCst);
+    SIGWINCH_PIPE_WR.store(-1, Ordering::SeqCst);
     drop(sigchld_pipe_wr);
     drop(sigchld_pipe_rd);
+    drop(sigwinch_pipe_wr);
+    drop(sigwinch_pipe_rd);
     let sig_default = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
     unsafe {
         sigaction(Signal::SIGCHLD, &sig_default).ok();
+        sigaction(Signal::SIGWINCH, &sig_default).ok();
         sigaction(Signal::SIGTSTP, &sig_default).ok();
     }
 
