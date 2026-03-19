@@ -21,7 +21,9 @@ eval "$(dejiny init zsh)"
 
 This installs hooks that automatically store each command after it runs and binds `Ctrl+R` to the interactive search UI.
 
-An init script also exists for `bash`, but I have not tested it yet, and have no idea if it works as expected. YMMV.
+- An init script also exists for `bash`, but I have not tested it yet, and have no idea if it works as expected. YMMV.
+- Completions exist for many other shells too, provided by [`clap_complete`](https://docs.rs/clap_complete/latest/clap_complete/) and [`clap_complete_nushell`](https://docs.rs/clap_complete_nushell/latest/clap_complete_nushell/), but have also not be tested extensively
+
 
 ## Recording terminal sessions
 

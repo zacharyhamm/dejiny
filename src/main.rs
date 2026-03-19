@@ -10,13 +10,24 @@ mod summarize;
 mod terminal;
 mod util;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::generate;
+
+const NAME: &str = "dejiny";
 
 #[derive(Parser)]
-#[command(name = "dejiny", about = "Shell history manager")]
+#[command(name = NAME, about = "Shell history manager")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum Shell {
+    Elvish,
+    Fish,
+    Nushell,
+    PowerShell,
 }
 
 #[derive(Subcommand)]
@@ -73,6 +84,11 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
     #[command(hide = true)]
     Summarize { id: i64 },
     /// Manage summary blacklist patterns
@@ -127,6 +143,20 @@ fn main() {
         Commands::Record { command } => record::record(&command),
         Commands::Import { zsh, bash, dry_run } => import::import(zsh, bash, dry_run),
         Commands::Replay { id, speed, text } => replay::replay(id, speed, text),
+        Commands::Completions { shell } => {
+            let mut command = Cli::command();
+            let stdout = &mut std::io::stdout();
+            match shell {
+                Shell::Elvish => generate(clap_complete::Shell::Elvish, &mut command, NAME, stdout),
+                Shell::Fish => generate(clap_complete::Shell::Fish, &mut command, NAME, stdout),
+                Shell::Nushell => {
+                    generate(clap_complete_nushell::Nushell, &mut command, NAME, stdout)
+                }
+                Shell::PowerShell => {
+                    generate(clap_complete::Shell::PowerShell, &mut command, NAME, stdout)
+                }
+            }
+        }
         Commands::Summarize { id } => summarize::summarize(id),
         Commands::Blacklist { action } => match action {
             BlacklistAction::Add { pattern } => blacklist::add(&pattern),
