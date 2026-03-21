@@ -1,4 +1,4 @@
-use crate::db::{load_command_meta, load_recording, open_db};
+use crate::db::{load_command_meta, load_input_recording, load_recording, open_db};
 use crate::format::RecEvent;
 use crate::terminal::{RawModeGuard, reset_escape_state};
 use crate::util::{clean_text, format_duration};
@@ -31,6 +31,42 @@ fn text_impl(id: i64) -> anyhow::Result<()> {
         "# Terminal: {}x{}",
         rec.header.cols, rec.header.rows
     )?;
+
+    if !text.is_empty() {
+        writeln!(stdout)?;
+        write!(stdout, "{text}")?;
+        // Ensure trailing newline
+        if !text.ends_with('\n') {
+            writeln!(stdout)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn input_text_impl(id: i64) -> anyhow::Result<()> {
+    let conn = open_db()?;
+    let rec = load_input_recording(&conn, id)?;
+    let meta = load_command_meta(&conn, id);
+
+    let text = clean_text(&rec.concatenate_event_data());
+
+    let mut stdout = std::io::stdout();
+
+    // Print metadata header
+    if let Some(meta) = &meta {
+        writeln!(stdout, "# Command: {}", meta.command)?;
+        writeln!(stdout, "# Directory: {}", meta.cwd)?;
+        writeln!(stdout, "# Exit Code: {}", meta.exit_code)?;
+        let duration = meta.end - meta.start;
+        writeln!(stdout, "# Duration: {}", format_duration(duration))?;
+    }
+    writeln!(
+        stdout,
+        "# Terminal: {}x{}",
+        rec.header.cols, rec.header.rows
+    )?;
+    writeln!(stdout, "# Stream: input")?;
 
     if !text.is_empty() {
         writeln!(stdout)?;
@@ -130,7 +166,7 @@ fn handle_key(key: ControlKey, stdin: &std::io::Stdin) -> KeyAction {
     }
 }
 
-pub fn replay(id: Option<i64>, speed: f64, text: bool) {
+pub fn replay(id: Option<i64>, speed: f64, text: bool, input: bool) {
     let id = match id {
         Some(id) => id,
         None => match resolve_latest_recording() {
@@ -141,7 +177,9 @@ pub fn replay(id: Option<i64>, speed: f64, text: bool) {
             }
         },
     };
-    let result = if text {
+    let result = if input {
+        input_text_impl(id)
+    } else if text {
         text_impl(id)
     } else {
         replay_impl(id, speed)

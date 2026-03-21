@@ -71,6 +71,16 @@ pub fn open_db_at(dir: &std::path::Path) -> anyhow::Result<Connection> {
     )?;
 
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS input_recording_chunks (
+            command_id INTEGER NOT NULL,
+            seq        INTEGER NOT NULL,
+            data       BLOB NOT NULL,
+            PRIMARY KEY (command_id, seq)
+        )",
+        [],
+    )?;
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS summary_blacklist (
             id      INTEGER PRIMARY KEY,
             pattern TEXT NOT NULL UNIQUE
@@ -121,6 +131,27 @@ impl AsRef<str> for HistoryEntry {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum RecordingTable {
+    Output,
+    Input,
+}
+
+impl AsRef<str> for RecordingTable {
+    fn as_ref(&self) -> &str {
+        match self {
+            RecordingTable::Output => "recording_chunks",
+            RecordingTable::Input => "input_recording_chunks",
+        }
+    }
+}
+
+impl std::fmt::Display for RecordingTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+
 pub struct LoadedRecording {
     pub header: RecordingHeader,
     pub data: Vec<u8>,
@@ -137,15 +168,21 @@ impl LoadedRecording {
     }
 }
 
-pub fn load_recording(conn: &Connection, id: i64) -> anyhow::Result<LoadedRecording> {
-    let mut chunk_stmt =
-        conn.prepare("SELECT data FROM recording_chunks WHERE command_id = ?1 ORDER BY seq")?;
+fn load_recording_from_table(
+    conn: &Connection,
+    id: i64,
+    table: RecordingTable,
+    error_msg: &str,
+) -> anyhow::Result<LoadedRecording> {
+    let table_name = table.as_ref();
+    let sql = format!("SELECT data FROM {table_name} WHERE command_id = ?1 ORDER BY seq");
+    let mut chunk_stmt = conn.prepare(&sql)?;
     let chunks: Vec<Vec<u8>> = chunk_stmt
         .query_map([id], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
     if chunks.is_empty() {
-        anyhow::bail!("no recording for this command");
+        anyhow::bail!("{error_msg}");
     }
     let data = {
         let mut buf = Vec::new();
@@ -164,6 +201,19 @@ pub fn load_recording(conn: &Connection, id: i64) -> anyhow::Result<LoadedRecord
         data,
         events,
     })
+}
+
+pub fn load_recording(conn: &Connection, id: i64) -> anyhow::Result<LoadedRecording> {
+    load_recording_from_table(conn, id, RecordingTable::Output, "no recording for this command")
+}
+
+pub fn load_input_recording(conn: &Connection, id: i64) -> anyhow::Result<LoadedRecording> {
+    load_recording_from_table(
+        conn,
+        id,
+        RecordingTable::Input,
+        "no input recording for this command",
+    )
 }
 
 pub struct CommandMeta {

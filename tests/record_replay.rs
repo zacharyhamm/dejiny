@@ -493,6 +493,185 @@ fn text_complex_escapes() {
 }
 
 // ---------------------------------------------------------------------------
+// --input mode helpers
+// ---------------------------------------------------------------------------
+
+/// Insert a synthetic input recording into the test database.
+fn insert_synthetic_input_recording(
+    conn: &Connection,
+    command_id: i64,
+    cols: u16,
+    rows: u16,
+    events: &[(u64, &[u8])],
+) {
+    let recording = build_recording(cols, rows, events);
+    let compressed = zstd::encode_all(&recording[..], 3).unwrap();
+    conn.execute(
+        "INSERT INTO input_recording_chunks (command_id, seq, data) VALUES (?1, 0, ?2)",
+        rusqlite::params![command_id, compressed],
+    )
+    .unwrap();
+}
+
+/// Run `dejiny replay --input` with piped I/O.
+fn replay_input_text_command(data_dir: &Path, id: i64) -> Output {
+    Command::new(dejiny_bin())
+        .args(["replay", &id.to_string(), "--input"])
+        .env("XDG_DATA_HOME", data_dir.parent().unwrap())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("failed to run dejiny replay --input")
+}
+
+// ---------------------------------------------------------------------------
+// --input mode tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn input_text_simple() {
+    let (_tmp, data_dir) = setup_replay_env();
+    let conn = open_test_db(&data_dir);
+    let id = insert_synthetic_recording(&conn, "cat", 80, 24, &[(0, b"echoed\r\n")]);
+    insert_synthetic_input_recording(&conn, id, 80, 24, &[(0, b"hello world\n")]);
+    drop(conn);
+
+    let out = replay_input_text_command(&data_dir, id);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("hello world"),
+        "expected 'hello world' in input text output"
+    );
+}
+
+#[test]
+fn input_text_strips_ansi() {
+    let (_tmp, data_dir) = setup_replay_env();
+    let conn = open_test_db(&data_dir);
+    let id = insert_synthetic_recording(&conn, "test", 80, 24, &[(0, b"output\r\n")]);
+    // Simulate arrow keys and other escape sequences in input
+    insert_synthetic_input_recording(
+        &conn,
+        id,
+        80,
+        24,
+        &[(0, b"\x1b[Ahello\x1b[B\x1b[C\x1b[D")],
+    );
+    drop(conn);
+
+    let out = replay_input_text_command(&data_dir, id);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("hello"), "expected 'hello' in input text");
+    assert!(
+        !stdout.contains("\x1b["),
+        "input text should not contain ANSI escapes"
+    );
+}
+
+#[test]
+fn input_text_metadata_header() {
+    let (_tmp, data_dir) = setup_replay_env();
+    let conn = open_test_db(&data_dir);
+    let id = insert_synthetic_recording_with_meta(
+        &conn,
+        "vim file.txt",
+        0,
+        "/home/user",
+        1000.0,
+        1005.0,
+        80,
+        24,
+        &[(0, b"output")],
+    );
+    insert_synthetic_input_recording(&conn, id, 80, 24, &[(0, b"isome text\x1b")]);
+    drop(conn);
+
+    let out = replay_input_text_command(&data_dir, id);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("# Stream: input"),
+        "expected '# Stream: input' header"
+    );
+    assert!(
+        stdout.contains("# Command: vim file.txt"),
+        "expected command header"
+    );
+}
+
+#[test]
+fn input_text_missing_recording_error() {
+    let (_tmp, data_dir) = setup_replay_env();
+    let conn = open_test_db(&data_dir);
+    // Insert output recording but no input recording
+    let id = insert_synthetic_recording(&conn, "echo test", 80, 24, &[(0, b"test\r\n")]);
+    drop(conn);
+
+    let out = replay_input_text_command(&data_dir, id);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no input recording"),
+        "expected 'no input recording' error, got: {stderr}"
+    );
+}
+
+#[test]
+fn input_text_mutual_exclusivity() {
+    let (_tmp, data_dir) = setup_replay_env();
+    let conn = open_test_db(&data_dir);
+    let _id = insert_synthetic_recording(&conn, "test", 80, 24, &[(0, b"test\r\n")]);
+    drop(conn);
+
+    let out = Command::new(dejiny_bin())
+        .args(["replay", "1", "--text", "--input"])
+        .env("XDG_DATA_HOME", data_dir.parent().unwrap())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("failed to run dejiny replay --text --input");
+
+    assert!(
+        !out.status.success(),
+        "--text and --input should be mutually exclusive"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "expected conflict error, got: {stderr}"
+    );
+}
+
+#[test]
+fn input_text_empty_recording() {
+    let (_tmp, data_dir) = setup_replay_env();
+    let conn = open_test_db(&data_dir);
+    let id = insert_synthetic_recording(&conn, "sleep 1", 80, 24, &[(0, b"")]);
+    insert_synthetic_input_recording(&conn, id, 80, 24, &[]);
+    drop(conn);
+
+    let out = replay_input_text_command(&data_dir, id);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("# Stream: input"),
+        "expected '# Stream: input' header"
+    );
+    assert!(
+        stdout.contains("# Terminal: 80x24"),
+        "expected terminal header"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Resize propagation test
 // ---------------------------------------------------------------------------
 

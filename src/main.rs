@@ -69,8 +69,11 @@ enum Commands {
         #[arg(long, default_value = "1.0")]
         speed: f64,
         /// Output plain text with metadata instead of interactive replay
-        #[arg(long)]
+        #[arg(long, conflicts_with = "input")]
         text: bool,
+        /// Output recorded input keystrokes as plain text
+        #[arg(long, conflicts_with = "text")]
+        input: bool,
     },
     /// Import history from existing shell history files
     Import {
@@ -142,7 +145,7 @@ fn main() {
         Commands::Search { query } => search::search(query),
         Commands::Record { command } => record::record(&command),
         Commands::Import { zsh, bash, dry_run } => import::import(zsh, bash, dry_run),
-        Commands::Replay { id, speed, text } => replay::replay(id, speed, text),
+        Commands::Replay { id, speed, text, input } => replay::replay(id, speed, text, input),
         Commands::Completions { shell } => {
             let mut command = Cli::command();
             let stdout = &mut std::io::stdout();

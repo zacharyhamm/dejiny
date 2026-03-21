@@ -1,4 +1,4 @@
-use crate::db::open_db;
+use crate::db::{RecordingTable, open_db};
 use crate::format::RecordingHeader;
 use crate::terminal::RawModeGuard;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -104,11 +104,14 @@ fn flush_chunk(
     recording: &mut Recording,
     command_id: i64,
     chunk_seq: &mut i64,
+    table: RecordingTable,
 ) -> bool {
     let chunk_data = recording.take_buffer();
+    let table_name = table.as_ref();
+    let sql = format!("INSERT INTO {table_name} (command_id, seq, data) VALUES (?1, ?2, ?3)");
     match zstd::encode_all(&chunk_data[..], ZSTD_LEVEL) {
         Ok(compressed) => match conn.execute(
-            "INSERT INTO recording_chunks (command_id, seq, data) VALUES (?1, ?2, ?3)",
+            &sql,
             rusqlite::params![command_id, *chunk_seq, compressed],
         ) {
             Ok(_) => {
@@ -407,6 +410,7 @@ fn run_recording_session(
     }
 
     let mut recording = Recording::new(winsize.ws_col, winsize.ws_row);
+    let mut input_recording = Recording::new(winsize.ws_col, winsize.ws_row);
     let mut buf = [0u8; 4096];
 
     let start_time = std::time::SystemTime::now()
@@ -423,7 +427,9 @@ fn run_recording_session(
     )?;
     let command_id = conn.last_insert_rowid();
     let mut chunk_seq: i64 = 0;
+    let mut input_chunk_seq: i64 = 0;
     let mut recording_failed = false;
+    let mut input_recording_failed = false;
     let mut child_exit: Option<i32> = None;
 
     // Poll loop
@@ -536,7 +542,7 @@ fn run_recording_session(
                         if !recording_failed {
                             recording.append(&buf[..n]);
                             if recording.len() >= CHUNK_FLUSH_THRESHOLD
-                                && !flush_chunk(&conn, &mut recording, command_id, &mut chunk_seq)
+                                && !flush_chunk(&conn, &mut recording, command_id, &mut chunk_seq, RecordingTable::Output)
                             {
                                 recording_failed = true;
                             }
@@ -567,6 +573,14 @@ fn run_recording_session(
                     }
                     // Always forward all bytes to the child.
                     let write_result = nix::unistd::write(&master_fd, &buf[..n]);
+                    if !input_recording_failed {
+                        input_recording.append(&buf[..n]);
+                        if input_recording.len() >= CHUNK_FLUSH_THRESHOLD
+                            && !flush_chunk(&conn, &mut input_recording, command_id, &mut input_chunk_seq, RecordingTable::Input)
+                        {
+                            input_recording_failed = true;
+                        }
+                    }
                     if has_ctrl_z {
                         log::debug!("stdin: write to master = {write_result:?}");
                     }
@@ -652,7 +666,10 @@ fn run_recording_session(
 
     // Flush remaining buffer
     if !recording_failed && !recording.is_empty() {
-        flush_chunk(&conn, &mut recording, command_id, &mut chunk_seq);
+        flush_chunk(&conn, &mut recording, command_id, &mut chunk_seq, RecordingTable::Output);
+    }
+    if !input_recording_failed && !input_recording.is_empty() {
+        flush_chunk(&conn, &mut input_recording, command_id, &mut input_chunk_seq, RecordingTable::Input);
     }
 
     // Update command row with real exit code and end time
