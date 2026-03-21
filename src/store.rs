@@ -1,26 +1,9 @@
-use crate::db::{log_error, open_db};
+use crate::db::open_db;
 
 pub fn store(command: &str, exit_code: i32, start: &str, end: &str, cwd: &str) {
-    unsafe {
-        let pid = libc::fork();
-        if pid < 0 {
-            // fork failed — store synchronously as fallback
-            if let Err(e) = store_impl(command, exit_code, start, end, cwd) {
-                eprintln!("dejiny: store failed: {e}");
-            }
-            return;
-        }
-        if pid > 0 {
-            return; // parent
-        }
-        // child — detach from terminal process group so Ctrl+C won't kill us
-        libc::setsid();
-    }
-
     if let Err(e) = store_impl(command, exit_code, start, end, cwd) {
-        log_error(&e.to_string());
+        eprintln!("dejiny: store failed: {e}");
     }
-    unsafe { libc::_exit(0) };
 }
 
 fn store_impl(

@@ -86,6 +86,12 @@ impl Recording {
         self.buf.extend_from_slice(data);
     }
 
+    /// Takes ownership of the current buffer, leaving `self.buf` empty.
+    ///
+    /// After this call, subsequent `append()` calls write events WITHOUT a
+    /// recording header. This is intentional: the multi-chunk load path
+    /// (`load_recording_from_table`) concatenates all chunks and parses the
+    /// header from chunk 0 only.
     fn take_buffer(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.buf)
     }
@@ -107,6 +113,10 @@ fn flush_chunk(
     table: RecordingTable,
 ) -> bool {
     let chunk_data = recording.take_buffer();
+    debug_assert!(
+        *chunk_seq > 0 || chunk_data.len() >= crate::format::HEADER_SIZE,
+        "first chunk must contain a recording header"
+    );
     let table_name = table.as_ref();
     let sql = format!("INSERT INTO {table_name} (command_id, seq, data) VALUES (?1, ?2, ?3)");
     match zstd::encode_all(&chunk_data[..], ZSTD_LEVEL) {

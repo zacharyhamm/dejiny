@@ -1,4 +1,4 @@
-use crate::db::{load_command_meta, load_input_recording, load_recording, open_db};
+use crate::db::{RecordingTable, load_command_meta, load_input_recording, load_recording, open_db};
 use crate::format::RecEvent;
 use crate::terminal::{RawModeGuard, reset_escape_state};
 use crate::util::{clean_text, format_duration};
@@ -169,13 +169,20 @@ fn handle_key(key: ControlKey, stdin: &std::io::Stdin) -> KeyAction {
 pub fn replay(id: Option<i64>, speed: f64, text: bool, input: bool) {
     let id = match id {
         Some(id) => id,
-        None => match resolve_latest_recording() {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("dejiny: {e}");
-                std::process::exit(1);
+        None => {
+            let table = if input {
+                RecordingTable::Input
+            } else {
+                RecordingTable::Output
+            };
+            match resolve_latest_recording(table) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("dejiny: {e}");
+                    std::process::exit(1);
+                }
             }
-        },
+        }
     };
     let result = if input {
         input_text_impl(id)
@@ -190,14 +197,14 @@ pub fn replay(id: Option<i64>, speed: f64, text: bool, input: bool) {
     }
 }
 
-fn resolve_latest_recording() -> anyhow::Result<i64> {
+fn resolve_latest_recording(table: RecordingTable) -> anyhow::Result<i64> {
     let conn = open_db()?;
-    conn.query_row(
-        "SELECT command_id FROM recording_chunks GROUP BY command_id ORDER BY command_id DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    )
-    .map_err(|_| anyhow::anyhow!("no recordings found"))
+    let table_name = table.as_ref();
+    let sql = format!(
+        "SELECT command_id FROM {table_name} GROUP BY command_id ORDER BY command_id DESC LIMIT 1"
+    );
+    conn.query_row(&sql, [], |row| row.get(0))
+        .map_err(|_| anyhow::anyhow!("no recordings found"))
 }
 
 /// Read one byte from stdin. If it starts an escape sequence, try to parse

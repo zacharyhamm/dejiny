@@ -26,8 +26,8 @@ pub fn clean_text(data: &[u8]) -> String {
     // strip_ansi_escapes removes all C0 controls including \t and \n.
     // Preserve tabs and newlines by replacing with printable placeholders
     // before stripping, then restoring them after.
-    const TAB_PLACEHOLDER: &[u8] = b"\xc2\xac"; // U+00AC (¬) as UTF-8
-    const LF_PLACEHOLDER: &[u8] = b"\xc2\xa6"; // U+00A6 (¦) as UTF-8
+    const TAB_PLACEHOLDER: &[u8] = b"\xee\x80\x80"; // U+E000 (Private Use Area) as UTF-8
+    const LF_PLACEHOLDER: &[u8] = b"\xee\x80\x81"; // U+E001 (Private Use Area) as UTF-8
 
     let mut preserved = Vec::with_capacity(data.len());
     for &b in data {
@@ -43,8 +43,8 @@ pub fn clean_text(data: &[u8]) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
-            '\u{00ac}' => out.push('\t'),
-            '\u{00a6}' => out.push('\n'),
+            '\u{e000}' => out.push('\t'),
+            '\u{e001}' => out.push('\n'),
             '\r' => {}
             c if c.is_control() => {}
             c => out.push(c),
@@ -71,6 +71,28 @@ pub fn format_duration(seconds: f64) -> String {
     let hours = (seconds / 3600.0).floor();
     let mins = ((seconds - hours * 3600.0) / 60.0).floor();
     format!("{hours:.0}h {mins:.0}m")
+}
+
+/// Shell-quote each argument and join with spaces, suitable for `$SHELL -c`.
+///
+/// Arguments containing only safe characters are passed through unchanged.
+/// All others are wrapped in single quotes with embedded `'` escaped as `'\''`.
+pub fn shell_quote_join(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if arg.is_empty() {
+                return "''".to_string();
+            }
+            if arg
+                .bytes()
+                .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b',' | b'+' | b'='))
+            {
+                return arg.clone();
+            }
+            format!("'{}'", arg.replace('\'', "'\\''"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn truncate_to_width(s: &str, max_width: usize) -> String {
@@ -165,5 +187,44 @@ mod tests {
     #[test]
     fn format_duration_negative() {
         assert_eq!(format_duration(-1.0), "0ms");
+    }
+
+    #[test]
+    fn clean_text_preserves_not_sign_and_broken_bar() {
+        // U+00AC (NOT SIGN) and U+00A6 (BROKEN BAR) should pass through unchanged
+        let input = "logic: \u{00ac}p \u{00a6} q".as_bytes();
+        let result = clean_text(input);
+        assert!(result.contains('\u{00ac}'), "NOT SIGN should be preserved");
+        assert!(result.contains('\u{00a6}'), "BROKEN BAR should be preserved");
+    }
+
+    #[test]
+    fn shell_quote_simple() {
+        let args: Vec<String> = vec!["ls".into(), "-la".into()];
+        assert_eq!(shell_quote_join(&args), "ls -la");
+    }
+
+    #[test]
+    fn shell_quote_spaces() {
+        let args: Vec<String> = vec!["ls".into(), "my dir".into()];
+        assert_eq!(shell_quote_join(&args), "ls 'my dir'");
+    }
+
+    #[test]
+    fn shell_quote_embedded_single_quote() {
+        let args: Vec<String> = vec!["echo".into(), "it's".into()];
+        assert_eq!(shell_quote_join(&args), "echo 'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_quote_empty_arg() {
+        let args: Vec<String> = vec!["echo".into(), "".into()];
+        assert_eq!(shell_quote_join(&args), "echo ''");
+    }
+
+    #[test]
+    fn shell_quote_metacharacters() {
+        let args: Vec<String> = vec!["echo".into(), "hello; rm -rf /".into()];
+        assert_eq!(shell_quote_join(&args), "echo 'hello; rm -rf /'");
     }
 }

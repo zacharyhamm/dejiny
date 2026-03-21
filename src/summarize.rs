@@ -7,6 +7,7 @@ use std::time::Duration;
 
 const MAX_TEXT_BYTES: usize = 262_144; // 256 KB
 const HALF_WINDOW: usize = MAX_TEXT_BYTES / 2; // 128 KB
+const SUMMARIZE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn spawn_summarize(command_id: i64) {
     if std::env::var_os("DEJINY_NO_SUMMARY").is_some() {
@@ -121,15 +122,22 @@ fn summarize_impl(id: i64) -> anyhow::Result<()> {
             }
         };
 
-        if let Some(mut stdin) = child.stdin.take()
-            && let Err(e) = stdin.write_all(prompt.as_bytes())
-        {
-            last_err = format!("failed to write to claude stdin: {e}");
-            continue;
+        if let Some(mut stdin_pipe) = child.stdin.take() {
+            if let Err(e) = stdin_pipe.write_all(prompt.as_bytes()) {
+                last_err = format!("failed to write to claude stdin: {e}");
+                continue;
+            }
+            // stdin_pipe dropped here, closing the pipe to send EOF
         }
 
-        match child.wait_with_output() {
-            Ok(output) if output.status.success() => {
+        let child_pid = child.id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+
+        match rx.recv_timeout(SUMMARIZE_TIMEOUT) {
+            Ok(Ok(output)) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if text.is_empty() {
                     last_err = "claude returned empty summary".to_string();
@@ -138,13 +146,18 @@ fn summarize_impl(id: i64) -> anyhow::Result<()> {
                 summary = text;
                 break;
             }
-            Ok(output) => {
+            Ok(Ok(output)) => {
                 last_err = format!("claude exited with status {}", output.status);
-                continue;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 last_err = format!("failed to wait on claude: {e}");
-                continue;
+            }
+            Err(_) => {
+                // Timeout — kill the subprocess
+                unsafe {
+                    libc::kill(child_pid as i32, libc::SIGKILL);
+                }
+                last_err = "claude subprocess timed out after 60s".to_string();
             }
         }
     }

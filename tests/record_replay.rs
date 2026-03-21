@@ -671,6 +671,41 @@ fn input_text_empty_recording() {
     );
 }
 
+#[test]
+fn input_latest_resolves_from_input_table() {
+    let (_tmp, data_dir) = setup_replay_env();
+    let conn = open_test_db(&data_dir);
+    // Create a command with output recording only
+    let _id1 = insert_synthetic_recording(&conn, "output-only", 80, 24, &[(0, b"output\r\n")]);
+    // Create a command with both output and input recordings
+    let id2 = insert_synthetic_recording(&conn, "with-input", 80, 24, &[(0, b"output2\r\n")]);
+    insert_synthetic_input_recording(&conn, id2, 80, 24, &[(0, b"input data\n")]);
+    // Create another command with output only (higher ID than id2)
+    let _id3 = insert_synthetic_recording(&conn, "output-only-2", 80, 24, &[(0, b"output3\r\n")]);
+    drop(conn);
+
+    // replay --input without ID should find id2 (latest with input recording)
+    let out = Command::new(dejiny_bin())
+        .args(["replay", "--input"])
+        .env("XDG_DATA_HOME", data_dir.parent().unwrap())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("failed to run dejiny replay --input");
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("input data"),
+        "expected input data in output"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Resize propagation test
 // ---------------------------------------------------------------------------
@@ -805,7 +840,7 @@ fn fast_exit_captures_output() {
                 let xdg_data = tmp.path().to_str().unwrap();
                 unsafe {
                     std::env::set_var("XDG_DATA_HOME", xdg_data);
-                    std::env::set_var("DEJINY_NO_SUMMARIZE", "1");
+                    std::env::set_var("DEJINY_NO_SUMMARY", "1");
                 }
 
                 let dejiny = PathBuf::from(env!("CARGO_BIN_EXE_dejiny"));
