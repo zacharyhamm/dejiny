@@ -120,19 +120,18 @@ fn flush_chunk(
     let table_name = table.as_ref();
     let sql = format!("INSERT INTO {table_name} (command_id, seq, data) VALUES (?1, ?2, ?3)");
     match zstd::encode_all(&chunk_data[..], ZSTD_LEVEL) {
-        Ok(compressed) => match conn.execute(
-            &sql,
-            rusqlite::params![command_id, *chunk_seq, compressed],
-        ) {
-            Ok(_) => {
-                *chunk_seq += 1;
-                true
+        Ok(compressed) => {
+            match conn.execute(&sql, rusqlite::params![command_id, *chunk_seq, compressed]) {
+                Ok(_) => {
+                    *chunk_seq += 1;
+                    true
+                }
+                Err(e) => {
+                    eprintln!("\r\ndejiny: recording flush failed, stopping capture: {e}\r");
+                    false
+                }
             }
-            Err(e) => {
-                eprintln!("\r\ndejiny: recording flush failed, stopping capture: {e}\r");
-                false
-            }
-        },
+        }
         Err(e) => {
             eprintln!("\r\ndejiny: recording compress failed, stopping capture: {e}\r");
             false
@@ -552,7 +551,13 @@ fn run_recording_session(
                         if !recording_failed {
                             recording.append(&buf[..n]);
                             if recording.len() >= CHUNK_FLUSH_THRESHOLD
-                                && !flush_chunk(&conn, &mut recording, command_id, &mut chunk_seq, RecordingTable::Output)
+                                && !flush_chunk(
+                                    &conn,
+                                    &mut recording,
+                                    command_id,
+                                    &mut chunk_seq,
+                                    RecordingTable::Output,
+                                )
                             {
                                 recording_failed = true;
                             }
@@ -586,7 +591,13 @@ fn run_recording_session(
                     if !input_recording_failed {
                         input_recording.append(&buf[..n]);
                         if input_recording.len() >= CHUNK_FLUSH_THRESHOLD
-                            && !flush_chunk(&conn, &mut input_recording, command_id, &mut input_chunk_seq, RecordingTable::Input)
+                            && !flush_chunk(
+                                &conn,
+                                &mut input_recording,
+                                command_id,
+                                &mut input_chunk_seq,
+                                RecordingTable::Input,
+                            )
                         {
                             input_recording_failed = true;
                         }
@@ -676,10 +687,22 @@ fn run_recording_session(
 
     // Flush remaining buffer
     if !recording_failed && !recording.is_empty() {
-        flush_chunk(&conn, &mut recording, command_id, &mut chunk_seq, RecordingTable::Output);
+        flush_chunk(
+            &conn,
+            &mut recording,
+            command_id,
+            &mut chunk_seq,
+            RecordingTable::Output,
+        );
     }
     if !input_recording_failed && !input_recording.is_empty() {
-        flush_chunk(&conn, &mut input_recording, command_id, &mut input_chunk_seq, RecordingTable::Input);
+        flush_chunk(
+            &conn,
+            &mut input_recording,
+            command_id,
+            &mut input_chunk_seq,
+            RecordingTable::Input,
+        );
     }
 
     // Update command row with real exit code and end time

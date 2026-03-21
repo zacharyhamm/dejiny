@@ -50,6 +50,19 @@ enum Commands {
         #[arg(long)]
         cwd: String,
     },
+    #[command(hide = true)]
+    StoreInternal {
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        exit_code: i32,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        end: String,
+        #[arg(long)]
+        cwd: String,
+    },
     /// Fuzzy search command history
     Search {
         /// Initial search query (pre-populated from shell input)
@@ -142,10 +155,22 @@ fn main() {
             end,
             cwd,
         } => store::store(&command, exit_code, &start, &end, &cwd),
+        Commands::StoreInternal {
+            command,
+            exit_code,
+            start,
+            end,
+            cwd,
+        } => store::store_internal(&command, exit_code, &start, &end, &cwd),
         Commands::Search { query } => search::search(query),
         Commands::Record { command } => record::record(&command),
         Commands::Import { zsh, bash, dry_run } => import::import(zsh, bash, dry_run),
-        Commands::Replay { id, speed, text, input } => replay::replay(id, speed, text, input),
+        Commands::Replay {
+            id,
+            speed,
+            text,
+            input,
+        } => replay::replay(id, speed, text, input),
         Commands::Completions { shell } => {
             let mut command = Cli::command();
             let stdout = &mut std::io::stdout();

@@ -195,7 +195,10 @@ mod tests {
         let input = "logic: \u{00ac}p \u{00a6} q".as_bytes();
         let result = clean_text(input);
         assert!(result.contains('\u{00ac}'), "NOT SIGN should be preserved");
-        assert!(result.contains('\u{00a6}'), "BROKEN BAR should be preserved");
+        assert!(
+            result.contains('\u{00a6}'),
+            "BROKEN BAR should be preserved"
+        );
     }
 
     #[test]

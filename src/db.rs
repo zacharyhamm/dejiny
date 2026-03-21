@@ -204,7 +204,12 @@ fn load_recording_from_table(
 }
 
 pub fn load_recording(conn: &Connection, id: i64) -> anyhow::Result<LoadedRecording> {
-    load_recording_from_table(conn, id, RecordingTable::Output, "no recording for this command")
+    load_recording_from_table(
+        conn,
+        id,
+        RecordingTable::Output,
+        "no recording for this command",
+    )
 }
 
 pub fn load_input_recording(conn: &Connection, id: i64) -> anyhow::Result<LoadedRecording> {

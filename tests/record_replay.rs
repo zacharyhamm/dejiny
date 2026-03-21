@@ -525,6 +525,18 @@ fn replay_input_text_command(data_dir: &Path, id: i64) -> Output {
         .expect("failed to run dejiny replay --input")
 }
 
+/// Run `dejiny replay --input` without an explicit ID.
+fn replay_latest_input_text_command(data_dir: &Path) -> Output {
+    Command::new(dejiny_bin())
+        .args(["replay", "--input"])
+        .env("XDG_DATA_HOME", data_dir.parent().unwrap())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("failed to run dejiny replay --input")
+}
+
 // ---------------------------------------------------------------------------
 // --input mode tests
 // ---------------------------------------------------------------------------
@@ -556,13 +568,7 @@ fn input_text_strips_ansi() {
     let conn = open_test_db(&data_dir);
     let id = insert_synthetic_recording(&conn, "test", 80, 24, &[(0, b"output\r\n")]);
     // Simulate arrow keys and other escape sequences in input
-    insert_synthetic_input_recording(
-        &conn,
-        id,
-        80,
-        24,
-        &[(0, b"\x1b[Ahello\x1b[B\x1b[C\x1b[D")],
-    );
+    insert_synthetic_input_recording(&conn, id, 80, 24, &[(0, b"\x1b[Ahello\x1b[B\x1b[C\x1b[D")]);
     drop(conn);
 
     let out = replay_input_text_command(&data_dir, id);
@@ -685,14 +691,7 @@ fn input_latest_resolves_from_input_table() {
     drop(conn);
 
     // replay --input without ID should find id2 (latest with input recording)
-    let out = Command::new(dejiny_bin())
-        .args(["replay", "--input"])
-        .env("XDG_DATA_HOME", data_dir.parent().unwrap())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .expect("failed to run dejiny replay --input");
+    let out = replay_latest_input_text_command(&data_dir);
 
     assert!(
         out.status.success(),
@@ -703,6 +702,35 @@ fn input_latest_resolves_from_input_table() {
     assert!(
         stdout.contains("input data"),
         "expected input data in output"
+    );
+}
+
+#[test]
+fn input_latest_skips_header_only_recordings() {
+    let (_tmp, data_dir) = setup_replay_env();
+    let conn = open_test_db(&data_dir);
+    let id1 = insert_synthetic_recording(&conn, "with-input", 80, 24, &[(0, b"output1\r\n")]);
+    insert_synthetic_input_recording(&conn, id1, 80, 24, &[(0, b"typed input\n")]);
+
+    let id2 = insert_synthetic_recording(&conn, "header-only", 80, 24, &[(0, b"output2\r\n")]);
+    insert_synthetic_input_recording(&conn, id2, 80, 24, &[]);
+    drop(conn);
+
+    let out = replay_latest_input_text_command(&data_dir);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("# Command: with-input"),
+        "expected latest replayable input recording"
+    );
+    assert!(stdout.contains("typed input"), "expected captured input");
+    assert!(
+        !stdout.contains("# Command: header-only"),
+        "should skip header-only input recordings"
     );
 }
 

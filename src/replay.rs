@@ -199,12 +199,38 @@ pub fn replay(id: Option<i64>, speed: f64, text: bool, input: bool) {
 
 fn resolve_latest_recording(table: RecordingTable) -> anyhow::Result<i64> {
     let conn = open_db()?;
-    let table_name = table.as_ref();
-    let sql = format!(
-        "SELECT command_id FROM {table_name} GROUP BY command_id ORDER BY command_id DESC LIMIT 1"
-    );
-    conn.query_row(&sql, [], |row| row.get(0))
-        .map_err(|_| anyhow::anyhow!("no recordings found"))
+    match table {
+        RecordingTable::Output => {
+            let table_name = table.as_ref();
+            let sql = format!(
+                "SELECT command_id FROM {table_name} GROUP BY command_id ORDER BY command_id DESC LIMIT 1"
+            );
+            conn.query_row(&sql, [], |row| row.get(0))
+                .map_err(|_| anyhow::anyhow!("no recordings found"))
+        }
+        RecordingTable::Input => {
+            let mut stmt = conn.prepare(
+                "SELECT command_id
+                 FROM input_recording_chunks
+                 GROUP BY command_id
+                 ORDER BY command_id DESC",
+            )?;
+            let mut ids = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+            let mut saw_recording = false;
+            while let Some(id) = ids.next() {
+                let id = id?;
+                saw_recording = true;
+                let rec = load_input_recording(&conn, id)?;
+                if !rec.events.is_empty() {
+                    return Ok(id);
+                }
+            }
+            if saw_recording {
+                anyhow::bail!("no input recordings with captured input found");
+            }
+            anyhow::bail!("no recordings found");
+        }
+    }
 }
 
 /// Read one byte from stdin. If it starts an escape sequence, try to parse
