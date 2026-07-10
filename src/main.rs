@@ -1,5 +1,6 @@
 pub use dejiny::{db, format};
 mod blacklist;
+mod config;
 mod import;
 mod init;
 mod record;
@@ -7,6 +8,7 @@ mod replay;
 mod search;
 mod store;
 mod summarize;
+mod sync;
 mod terminal;
 mod util;
 
@@ -80,6 +82,33 @@ enum Commands {
         #[command(subcommand)]
         action: BlacklistAction,
     },
+    /// Synchronize history with configured peer nodes
+    Sync {
+        #[command(subcommand)]
+        action: SyncAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncAction {
+    /// Listen for history from peer nodes
+    Listen {
+        /// Run in the background, managed via `dejiny sync stop`
+        #[arg(long)]
+        daemon: bool,
+    },
+    /// Stop the backgrounded sync daemon
+    Stop,
+    /// Push pending outbox entries to all peers
+    Flush {
+        /// Respect the retry backoff (used by automatic background flushes)
+        #[arg(long, hide = true)]
+        auto: bool,
+    },
+    /// Show daemon state and per-node outbox depth
+    Status,
+    /// Generate a preshared key for config.toml
+    Keygen,
 }
 
 #[derive(Subcommand)]
@@ -132,6 +161,13 @@ fn main() {
             BlacklistAction::Add { pattern } => blacklist::add(&pattern),
             BlacklistAction::Remove { pattern } => blacklist::remove(&pattern),
             BlacklistAction::List => blacklist::list(),
+        },
+        Commands::Sync { action } => match action {
+            SyncAction::Listen { daemon } => sync::listen_cmd(daemon),
+            SyncAction::Stop => sync::stop_cmd(),
+            SyncAction::Flush { auto } => sync::flush_cmd(auto),
+            SyncAction::Status => sync::status_cmd(),
+            SyncAction::Keygen => sync::keygen_cmd(),
         },
     }
 }

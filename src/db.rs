@@ -78,6 +78,23 @@ pub fn open_db_at(dir: &std::path::Path) -> anyhow::Result<Connection> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_outbox (
+            id           INTEGER PRIMARY KEY,
+            command_id   INTEGER NOT NULL,
+            node         TEXT NOT NULL,
+            created      REAL NOT NULL,
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            last_attempt REAL,
+            UNIQUE(command_id, node)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outbox_node ON sync_outbox(node)",
+        [],
+    )?;
+
     // Migration: add summary column (silently ignore if already exists)
     let _ = conn.execute("ALTER TABLE commands ADD COLUMN summary TEXT", []);
 
@@ -111,6 +128,7 @@ pub struct HistoryEntry {
     pub exit_code: i32,
     pub start: f64,
     pub cwd: String,
+    pub hostname: String,
     pub has_recording: bool,
     pub summary: Option<String>,
 }
@@ -194,7 +212,7 @@ pub fn load_command_meta(conn: &Connection, id: i64) -> Option<CommandMeta> {
 pub fn load_commands() -> anyhow::Result<Vec<HistoryEntry>> {
     let conn = open_db()?;
     let query = format!(
-        "SELECT id, command, exit_code, start, cwd,
+        "SELECT id, command, exit_code, start, cwd, hostname,
                 EXISTS (SELECT 1 FROM recording_chunks WHERE command_id = commands.id) as has_recording,
                 summary
          FROM commands
@@ -209,8 +227,9 @@ pub fn load_commands() -> anyhow::Result<Vec<HistoryEntry>> {
             exit_code: row.get(2)?,
             start: row.get(3)?,
             cwd: row.get(4)?,
-            has_recording: row.get(5)?,
-            summary: row.get(6)?,
+            hostname: row.get(5)?,
+            has_recording: row.get(6)?,
+            summary: row.get(7)?,
         })
     })?;
     let mut entries = Vec::new();

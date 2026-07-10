@@ -30,17 +30,33 @@ fn store_impl(
     end: &str,
     cwd: &str,
 ) -> anyhow::Result<()> {
-    let conn = open_db()?;
+    let mut conn = open_db()?;
 
     let start: f64 = start.parse()?;
     let end: f64 = end.parse()?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
+    let sync_cfg = crate::config::load();
 
-    conn.execute(
+    // Insert and enqueue in one transaction so a crash can't produce a
+    // command that silently never syncs.
+    let tx = conn.transaction()?;
+    tx.execute(
         "INSERT INTO commands (command, exit_code, start, end, cwd, hostname)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![command, exit_code, start, end, cwd, hostname],
     )?;
+    if let Some(cfg) = &sync_cfg {
+        crate::sync::enqueue(&tx, cfg, tx.last_insert_rowid())?;
+    }
+    tx.commit()?;
+
+    // We're in the detached fork, so network latency costs the shell
+    // nothing; failures stay queued for the next flush.
+    if let Some(cfg) = &sync_cfg
+        && let Err(e) = crate::sync::flush_outbox(&mut conn, cfg, false)
+    {
+        log_error(&format!("sync flush: {e}"));
+    }
 
     Ok(())
 }

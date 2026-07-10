@@ -53,6 +53,25 @@ pub fn clean_text(data: &[u8]) -> String {
     out
 }
 
+pub fn format_timestamp(ts: f64) -> String {
+    if ts == 0.0 {
+        return "unknown time         ".to_string();
+    }
+    // Use libc to format the timestamp without pulling in chrono
+    let secs = ts as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+    )
+}
+
 pub fn format_duration(seconds: f64) -> String {
     if seconds < 0.0 {
         return "0ms".to_string();
