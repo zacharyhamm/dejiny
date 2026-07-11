@@ -51,7 +51,8 @@ pub fn open_db_at(dir: &std::path::Path) -> anyhow::Result<Connection> {
             start     REAL NOT NULL,
             end       REAL NOT NULL,
             cwd       TEXT NOT NULL,
-            hostname  TEXT NOT NULL
+            hostname  TEXT NOT NULL,
+            sync_id   TEXT
         )",
         [],
     )?;
@@ -86,6 +87,7 @@ pub fn open_db_at(dir: &std::path::Path) -> anyhow::Result<Connection> {
             created      REAL NOT NULL,
             attempts     INTEGER NOT NULL DEFAULT 0,
             last_attempt REAL,
+            error        TEXT,
             UNIQUE(command_id, node)
         )",
         [],
@@ -97,6 +99,31 @@ pub fn open_db_at(dir: &std::path::Path) -> anyhow::Result<Connection> {
 
     // Migration: add summary column (silently ignore if already exists)
     let _ = conn.execute("ALTER TABLE commands ADD COLUMN summary TEXT", []);
+    // Stable event IDs make sync redelivery idempotent without conflating two
+    // legitimate commands that happen to have identical metadata.
+    let _ = conn.execute("ALTER TABLE commands ADD COLUMN sync_id TEXT", []);
+    conn.execute(
+        "UPDATE commands SET sync_id = lower(hex(randomblob(16))) WHERE sync_id IS NULL",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_commands_sync_id ON commands(sync_id)",
+        [],
+    )?;
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS commands_assign_sync_id
+         AFTER INSERT ON commands
+         WHEN NEW.sync_id IS NULL
+         BEGIN
+             UPDATE commands
+             SET sync_id = lower(hex(randomblob(16)))
+             WHERE id = NEW.id;
+         END;",
+    )?;
+
+    // Quarantine entries that cannot fit in a protocol frame instead of
+    // retrying them forever and blocking everything queued behind them.
+    let _ = conn.execute("ALTER TABLE sync_outbox ADD COLUMN error TEXT", []);
 
     Ok(conn)
 }

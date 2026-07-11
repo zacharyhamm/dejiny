@@ -38,7 +38,9 @@ impl TestNode {
         std::fs::create_dir_all(&dir).unwrap();
         let mut contents = format!("[sync]\nkey = \"{key}\"\nlisten = \"{listen}\"\n");
         for (name, addr) in nodes {
-            contents.push_str(&format!("\n[[sync.nodes]]\nname = \"{name}\"\naddr = \"{addr}\"\n"));
+            contents.push_str(&format!(
+                "\n[[sync.nodes]]\nname = \"{name}\"\naddr = \"{addr}\"\n"
+            ));
         }
         let path = dir.join("config.toml");
         std::fs::write(&path, contents).unwrap();
@@ -73,7 +75,10 @@ impl TestNode {
                 }
                 Err(e) => last_err = e.to_string(),
             }
-            assert!(Instant::now() < deadline, "db access kept failing: {last_err}");
+            assert!(
+                Instant::now() < deadline,
+                "db access kept failing: {last_err}"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -231,7 +236,7 @@ fn store_syncs_to_peer_and_redelivery_is_idempotent() {
     });
 
     // Redeliver the same command by re-enqueueing it manually; the peer's
-    // (command, start, hostname) dedupe must absorb it.
+    // stable event-ID dedupe must absorb it.
     sender.with_db(|conn| {
         conn.execute(
             "INSERT INTO sync_outbox (command_id, node, created)
@@ -239,10 +244,22 @@ fn store_syncs_to_peer_and_redelivery_is_idempotent() {
             [cmd_text],
         )
     });
-    let status = sender.cmd(&["sync", "flush"]).stdout(Stdio::null()).status().unwrap();
+    let status = sender
+        .cmd(&["sync", "flush"])
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
     assert!(status.success());
-    assert_eq!(sender.outbox_state().0, 0, "redelivered outbox row should be drained");
-    assert_eq!(receiver.command_count(cmd_text), 1, "dedupe must keep exactly one row");
+    assert_eq!(
+        sender.outbox_state().0,
+        0,
+        "redelivered outbox row should be drained"
+    );
+    assert_eq!(
+        receiver.command_count(cmd_text),
+        1,
+        "dedupe must keep exactly one row"
+    );
 }
 
 #[test]
@@ -299,7 +316,11 @@ fn outbox_persists_until_listener_appears() {
     // Listener comes up; a manual flush overrides the backoff and delivers.
     let (_listener, bound_port) = spawn_listener(&receiver);
     assert_eq!(bound_port, port);
-    let status = sender.cmd(&["sync", "flush"]).stdout(Stdio::null()).status().unwrap();
+    let status = sender
+        .cmd(&["sync", "flush"])
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
     assert!(status.success());
 
     assert_eq!(receiver.command_count(cmd_text), 1);
@@ -331,7 +352,10 @@ fn daemon_lifecycle() {
         .unwrap();
     assert!(output.status.success(), "daemon start failed: {output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("(daemon)"), "unexpected startup output: {stdout}");
+    assert!(
+        stdout.contains("(daemon)"),
+        "unexpected startup output: {stdout}"
+    );
     assert_eq!(parse_port(&stdout), port);
 
     wait_for("PID file", Duration::from_secs(5), || {
@@ -394,4 +418,45 @@ fn daemon_lifecycle() {
         .unwrap();
     assert!(again.status.success());
     assert!(String::from_utf8_lossy(&again.stdout).contains("not running"));
+}
+
+#[test]
+fn daemon_start_reports_child_initialization_failure() {
+    let node = TestNode::new();
+    node.write_config("shared-key", "127.0.0.1:0", &[("peer", "127.0.0.1:1")]);
+    let blocked_data_root = node._tmp.path().join("not-a-directory");
+    std::fs::write(&blocked_data_root, b"file").unwrap();
+
+    let output = node
+        .cmd(&["sync", "listen", "--daemon"])
+        .env("XDG_DATA_HOME", &blocked_data_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("daemon failed to start"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn stop_rejects_special_pid_values() {
+    let node = TestNode::new();
+    let pid_file = node.pid_file();
+    std::fs::create_dir_all(pid_file.parent().unwrap()).unwrap();
+    std::fs::write(&pid_file, "-1").unwrap();
+
+    let output = node
+        .cmd(&["sync", "stop"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsafe PID"));
 }

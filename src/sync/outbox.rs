@@ -4,7 +4,7 @@
 //! `dejiny sync flush`); receiver-side dedupe makes redelivery idempotent.
 
 use crate::config::SyncConfig;
-use crate::sync::proto::CmdMsg;
+use crate::sync::proto::{self, CmdMsg};
 use rusqlite::Connection;
 
 /// Outbox rows older than this are dropped: a node unreachable for this long
@@ -53,7 +53,8 @@ pub fn prune(conn: &Connection, cfg: &SyncConfig) -> anyhow::Result<()> {
 /// should leave it alone: waits min(2^attempts, 600) seconds between tries.
 pub fn in_backoff(conn: &Connection, node: &str) -> anyhow::Result<bool> {
     let (attempts, last_attempt): (i64, Option<f64>) = conn.query_row(
-        "SELECT COALESCE(MAX(attempts), 0), MAX(last_attempt) FROM sync_outbox WHERE node = ?1",
+        "SELECT COALESCE(MAX(attempts), 0), MAX(last_attempt)
+         FROM sync_outbox WHERE node = ?1 AND error IS NULL",
         [node],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -64,23 +65,27 @@ pub fn in_backoff(conn: &Connection, node: &str) -> anyhow::Result<bool> {
     Ok(unix_now() - last < wait)
 }
 
-/// Pending commands for a node, oldest first, joined to their history rows.
+/// One bounded page of deliverable commands for a node, oldest first. Paging
+/// avoids materializing a multi-day offline backlog in memory.
 pub fn pending(conn: &Connection, node: &str) -> anyhow::Result<Vec<(i64, CmdMsg)>> {
     let mut stmt = conn.prepare(
-        "SELECT o.id, c.command, c.exit_code, c.start, c.end, c.cwd
+        "SELECT o.id, c.sync_id, c.hostname, c.command, c.exit_code, c.start, c.end, c.cwd
          FROM sync_outbox o JOIN commands c ON c.id = o.command_id
-         WHERE o.node = ?1
-         ORDER BY o.id",
+         WHERE o.node = ?1 AND o.error IS NULL
+         ORDER BY o.id
+         LIMIT ?2",
     )?;
-    let rows = stmt.query_map([node], |row| {
+    let rows = stmt.query_map(rusqlite::params![node, proto::MAX_BATCH as i64], |row| {
         Ok((
             row.get(0)?,
             CmdMsg {
-                command: row.get(1)?,
-                exit_code: row.get(2)?,
-                start: row.get(3)?,
-                end: row.get(4)?,
-                cwd: row.get(5)?,
+                id: row.get(1)?,
+                host: row.get(2)?,
+                command: row.get(3)?,
+                exit_code: row.get(4)?,
+                start: row.get(5)?,
+                end: row.get(6)?,
+                cwd: row.get(7)?,
             },
         ))
     })?;
@@ -93,8 +98,17 @@ pub fn pending(conn: &Connection, node: &str) -> anyhow::Result<Vec<(i64, CmdMsg
 
 pub fn mark_attempt(conn: &Connection, node: &str) -> anyhow::Result<()> {
     conn.execute(
-        "UPDATE sync_outbox SET attempts = attempts + 1, last_attempt = ?1 WHERE node = ?2",
+        "UPDATE sync_outbox SET attempts = attempts + 1, last_attempt = ?1
+         WHERE node = ?2 AND error IS NULL",
         rusqlite::params![unix_now(), node],
+    )?;
+    Ok(())
+}
+
+pub fn mark_permanent_error(conn: &Connection, outbox_id: i64, error: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE sync_outbox SET error = ?1 WHERE id = ?2",
+        rusqlite::params![error, outbox_id],
     )?;
     Ok(())
 }
@@ -113,20 +127,25 @@ pub fn delete_delivered(conn: &mut Connection, outbox_ids: &[i64]) -> anyhow::Re
 
 pub struct NodeStatus {
     pub pending: i64,
+    pub quarantined: i64,
     pub attempts: i64,
     pub last_attempt: Option<f64>,
 }
 
 pub fn node_status(conn: &Connection, node: &str) -> anyhow::Result<NodeStatus> {
     conn.query_row(
-        "SELECT COUNT(*), COALESCE(MAX(attempts), 0), MAX(last_attempt)
+        "SELECT COALESCE(SUM(CASE WHEN error IS NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(MAX(CASE WHEN error IS NULL THEN attempts END), 0),
+                MAX(CASE WHEN error IS NULL THEN last_attempt END)
          FROM sync_outbox WHERE node = ?1",
         [node],
         |row| {
             Ok(NodeStatus {
                 pending: row.get(0)?,
-                attempts: row.get(1)?,
-                last_attempt: row.get(2)?,
+                quarantined: row.get(1)?,
+                attempts: row.get(2)?,
+                last_attempt: row.get(3)?,
             })
         },
     )
@@ -178,6 +197,8 @@ mod tests {
         assert_eq!(pending(&conn, "a").unwrap().len(), 1);
         assert_eq!(pending(&conn, "b").unwrap().len(), 1);
         assert_eq!(pending(&conn, "a").unwrap()[0].1.command, "ls");
+        assert_eq!(pending(&conn, "a").unwrap()[0].1.host, "testhost");
+        assert!(!pending(&conn, "a").unwrap()[0].1.id.is_empty());
     }
 
     #[test]
@@ -240,8 +261,44 @@ mod tests {
         let cfg = test_cfg(&["a"]);
         let id = insert_command(&conn, "ls", 1.0);
         enqueue(&conn, &cfg, id).unwrap();
-        let ids: Vec<i64> = pending(&conn, "a").unwrap().iter().map(|(i, _)| *i).collect();
+        let ids: Vec<i64> = pending(&conn, "a")
+            .unwrap()
+            .iter()
+            .map(|(i, _)| *i)
+            .collect();
         delete_delivered(&mut conn, &ids).unwrap();
         assert!(pending(&conn, "a").unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_reads_only_one_bounded_page() {
+        let (_dir, conn) = test_db();
+        let cfg = test_cfg(&["a"]);
+        for id in 0..=crate::sync::proto::MAX_BATCH {
+            let command_id = insert_command(&conn, &format!("cmd-{id}"), id as f64);
+            enqueue(&conn, &cfg, command_id).unwrap();
+        }
+        assert_eq!(
+            pending(&conn, "a").unwrap().len(),
+            crate::sync::proto::MAX_BATCH
+        );
+    }
+
+    #[test]
+    fn permanent_errors_are_quarantined_and_reported() {
+        let (_dir, conn) = test_db();
+        let cfg = test_cfg(&["a"]);
+        let id = insert_command(&conn, "too large", 1.0);
+        enqueue(&conn, &cfg, id).unwrap();
+        let outbox_id = pending(&conn, "a").unwrap()[0].0;
+
+        mark_permanent_error(&conn, outbox_id, "frame too large").unwrap();
+
+        assert!(pending(&conn, "a").unwrap().is_empty());
+        let status = node_status(&conn, "a").unwrap();
+        assert_eq!(status.pending, 0);
+        assert_eq!(status.quarantined, 1);
+        assert_eq!(status.attempts, 0);
+        assert_eq!(status.last_attempt, None);
     }
 }

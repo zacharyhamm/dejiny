@@ -55,9 +55,8 @@ pub fn require() -> anyhow::Result<SyncConfig> {
     if let Some(warning) = permission_warning(&path) {
         eprintln!("dejiny: warning: {warning}");
     }
-    read_config(&path)?.ok_or_else(|| {
-        anyhow::anyhow!("no [sync] configuration found at {}", path.display())
-    })
+    read_config(&path)?
+        .ok_or_else(|| anyhow::anyhow!("no [sync] configuration found at {}", path.display()))
 }
 
 fn read_config(path: &std::path::Path) -> anyhow::Result<Option<SyncConfig>> {

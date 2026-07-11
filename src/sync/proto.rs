@@ -9,16 +9,16 @@
 //! The MAC is computed over exactly the payload bytes as transmitted and is
 //! verified (constant-time) before the JSON is parsed, so unauthenticated
 //! input is never fed to the parser. There is deliberately no
-//! timestamp/freshness check: a replayed message re-inserts rows that the
-//! receiver's (command, start, hostname) dedupe already makes idempotent,
-//! and skipping freshness eliminates clock-skew failures between nodes.
+//! timestamp/freshness check: stable per-command IDs make replayed messages
+//! idempotent, and skipping freshness eliminates clock-skew failures between
+//! nodes.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 /// Upper bound on a single wire line; the listener aborts reads beyond this.
 pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum commands per message; senders chunk larger backlogs.
@@ -27,12 +27,15 @@ pub const MAX_BATCH: usize = 512;
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub struct Envelope {
     pub v: u32,
-    pub host: String,
     pub cmds: Vec<CmdMsg>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct CmdMsg {
+    /// Stable, globally unique delivery identity generated when the command
+    /// is first stored. Metadata is deliberately not used for deduplication.
+    pub id: String,
+    pub host: String,
     pub command: String,
     pub exit_code: i32,
     pub start: f64,
@@ -48,7 +51,11 @@ fn mac_hex(key: &[u8], payload: &[u8]) -> String {
 
 pub fn encode(key: &[u8], env: &Envelope) -> anyhow::Result<String> {
     let payload = serde_json::to_string(env)?;
-    Ok(format!("{} {payload}\n", mac_hex(key, payload.as_bytes())))
+    let frame = format!("{} {payload}\n", mac_hex(key, payload.as_bytes()));
+    if frame.len() - 1 > MAX_LINE_BYTES {
+        anyhow::bail!("encoded frame exceeds {MAX_LINE_BYTES} bytes");
+    }
+    Ok(frame)
 }
 
 pub fn decode_verify(key: &[u8], line: &str) -> anyhow::Result<Envelope> {
@@ -85,8 +92,9 @@ mod tests {
     fn sample() -> Envelope {
         Envelope {
             v: PROTO_VERSION,
-            host: "zaphod".into(),
             cmds: vec![CmdMsg {
+                id: "event-1".into(),
+                host: "zaphod".into(),
                 command: "cargo test".into(),
                 exit_code: 0,
                 start: 1720000012.4831,
@@ -101,7 +109,7 @@ mod tests {
         let line = encode(KEY, &sample()).unwrap();
         assert!(line.ends_with('\n'));
         let env = decode_verify(KEY, &line).unwrap();
-        assert_eq!(env.host, "zaphod");
+        assert_eq!(env.cmds[0].host, "zaphod");
         assert_eq!(env.cmds, sample().cmds);
     }
 
@@ -149,7 +157,7 @@ mod tests {
     #[test]
     fn wrong_version_rejected() {
         let mut env = sample();
-        env.v = 2;
+        env.v = PROTO_VERSION + 1;
         let line = encode(KEY, &env).unwrap();
         assert!(decode_verify(KEY, &line).is_err());
     }
@@ -158,8 +166,10 @@ mod tests {
     fn oversized_batch_rejected() {
         let mut env = sample();
         env.cmds = vec![env.cmds[0].clone(); MAX_BATCH + 1];
-        let line = encode(KEY, &env).unwrap();
-        assert!(decode_verify(KEY, &line).is_err());
+        match encode(KEY, &env) {
+            Ok(line) => assert!(decode_verify(KEY, &line).is_err()),
+            Err(e) => assert!(e.to_string().contains("encoded frame exceeds")),
+        }
     }
 
     #[test]

@@ -165,7 +165,7 @@ WantedBy=default.target
 
 ### Delivery, retries, and status
 
-Each stored command is queued per node in a durable outbox and removed only once that node acknowledges it. Unreachable peers (laptop asleep, network down) simply accumulate a backlog that is retried — with exponential backoff — every time you run a command, so histories converge once the peer comes back. Duplicate deliveries are harmless: receivers dedupe on (command, timestamp, origin host). Outbox entries for a node that stays unreachable are dropped after 30 days.
+Each stored command is queued per node in a durable outbox and removed only once that node acknowledges it. Unreachable peers (laptop asleep, network down) simply accumulate a backlog that is retried — with exponential backoff — every time you run a command, so histories converge once the peer comes back. Duplicate deliveries are harmless: every command has a random stable event ID used for receiver-side deduplication. Outbox entries for a node that stays unreachable are dropped after 30 days. An individual entry too large for the wire protocol is quarantined, reported by `dejiny sync status`, and does not block later entries.
 
 ```
 dejiny sync status    # daemon state and per-node backlog
