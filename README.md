@@ -105,6 +105,72 @@ dejiny blacklist remove '^ssh '
 dejiny blacklist list
 ```
 
+## Syncing history between machines
+
+dejiny can broadcast newly stored commands to other dejiny instances over TCP, so every machine on your LAN or tailnet shares one command history. Synced entries carry the hostname of the machine they ran on and show up in the search UI as `command @otherhost`. Only command history is synced — terminal recordings and summaries stay local.
+
+Messages are authenticated with a preshared key (HMAC-SHA256), so only nodes holding the key can insert history. The transport itself is not encrypted; run it over a trusted network such as a tailnet.
+
+### Configuration
+
+Create `~/.config/dejiny/config.toml` on every node, listing all the other nodes:
+
+```toml
+[sync]
+key = "generate one with: dejiny sync keygen"
+listen = "0.0.0.0:28657"        # optional, this is the default
+
+[[sync.nodes]]
+name = "desktop"
+addr = "desktop.tail1234.ts.net:28657"
+
+[[sync.nodes]]
+name = "laptop"
+addr = "192.168.1.20:28657"
+```
+
+Every node must use the same `key`. Generate one and lock the file down:
+
+```
+dejiny sync keygen
+chmod 600 ~/.config/dejiny/config.toml
+```
+
+Without a config file (or without a `[sync]` section) dejiny behaves exactly as before — no sync, no listener, no queueing.
+
+### Receiving: the listener
+
+Each node runs a listener to receive commands from its peers. Either background it directly:
+
+```
+dejiny sync listen --daemon    # start in the background
+dejiny sync stop               # stop it
+```
+
+or run it in the foreground under a supervisor such as a systemd user unit (`~/.config/systemd/user/dejiny-sync.service`):
+
+```ini
+[Unit]
+Description=dejiny history sync listener
+
+[Service]
+ExecStart=%h/.cargo/bin/dejiny sync listen
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+### Delivery, retries, and status
+
+Each stored command is queued per node in a durable outbox and removed only once that node acknowledges it. Unreachable peers (laptop asleep, network down) simply accumulate a backlog that is retried — with exponential backoff — every time you run a command, so histories converge once the peer comes back. Duplicate deliveries are harmless: every command has a random stable event ID used for receiver-side deduplication. Outbox entries for a node that stays unreachable are dropped after 30 days. An individual entry too large for the wire protocol is quarantined, reported by `dejiny sync status`, and does not block later entries.
+
+```
+dejiny sync status    # daemon state and per-node backlog
+dejiny sync flush     # push the backlog right now, ignoring backoff
+```
+
 ## Data storage
 
-All data is stored in `$XDG_DATA_HOME/dejiny/history.db` (defaults to `~/.local/share/dejiny/history.db`). The database uses WAL mode for concurrent access. Debug logs are written to `debug.log` and errors to `error.log` in the same directory.
+All data is stored in `$XDG_DATA_HOME/dejiny/history.db` (defaults to `~/.local/share/dejiny/history.db`). The database uses WAL mode for concurrent access. Debug logs are written to `debug.log` and errors to `error.log` in the same directory. The sync listener's PID file (`sync.pid`) also lives there.

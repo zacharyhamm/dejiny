@@ -556,13 +556,7 @@ fn input_text_strips_ansi() {
     let conn = open_test_db(&data_dir);
     let id = insert_synthetic_recording(&conn, "test", 80, 24, &[(0, b"output\r\n")]);
     // Simulate arrow keys and other escape sequences in input
-    insert_synthetic_input_recording(
-        &conn,
-        id,
-        80,
-        24,
-        &[(0, b"\x1b[Ahello\x1b[B\x1b[C\x1b[D")],
-    );
+    insert_synthetic_input_recording(&conn, id, 80, 24, &[(0, b"\x1b[Ahello\x1b[B\x1b[C\x1b[D")]);
     drop(conn);
 
     let out = replay_input_text_command(&data_dir, id);

@@ -68,6 +68,7 @@ struct SearchState {
     filter_recorded: bool,
     focus: FocusedPanel,
     summary_scroll: u16,
+    local_host: String,
 }
 
 impl SearchState {
@@ -77,6 +78,9 @@ impl SearchState {
         if !filtered.is_empty() {
             list_state.select(Some(0));
         }
+        let local_host = hostname::get()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_default();
         Self {
             input: String::new(),
             all_entries: entries,
@@ -86,6 +90,7 @@ impl SearchState {
             filter_recorded: false,
             focus: FocusedPanel::Input,
             summary_scroll: 0,
+            local_host,
         }
     }
 
@@ -401,8 +406,15 @@ fn draw(f: &mut ratatui::Frame, state: &mut SearchState) {
 
             let id_str = format!("{:>6}", entry.id);
 
-            // Layout: id(6) + gap(1) + status(4) + gap(1) + rec(1) + gap(1) + command + gap(2) + cwd + gap(2) + time
-            let fixed = 6 + 1 + 4 + 1 + 1 + 1 + 2 + cwd.width() + 2 + time.width();
+            // Commands synced from another node show their origin host
+            let host = if entry.hostname != state.local_host {
+                format!(" @{}", entry.hostname)
+            } else {
+                String::new()
+            };
+
+            // Layout: id(6) + gap(1) + status(4) + gap(1) + rec(1) + gap(1) + command + host + gap(2) + cwd + gap(2) + time
+            let fixed = 6 + 1 + 4 + 1 + 1 + 1 + host.width() + 2 + cwd.width() + 2 + time.width();
             let cmd_width = inner_width.saturating_sub(fixed);
             let cmd_display = {
                 let cmd_w = entry.command.width();
@@ -422,6 +434,7 @@ fn draw(f: &mut ratatui::Frame, state: &mut SearchState) {
                 rec_indicator,
                 Span::raw(" "),
                 Span::raw(cmd_display),
+                Span::styled(host, Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("  {cwd}  "), Style::default().fg(Color::Cyan)),
                 Span::styled(time, Style::default().fg(Color::DarkGray)),
             ]))

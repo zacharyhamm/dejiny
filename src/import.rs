@@ -1,4 +1,5 @@
 use crate::db::open_db;
+use crate::util::format_timestamp;
 use rusqlite::TransactionBehavior;
 use std::fs;
 use std::path::PathBuf;
@@ -294,23 +295,4 @@ fn parse_bash_history(path: &PathBuf) -> anyhow::Result<Vec<ImportEntry>> {
     }
 
     Ok(entries)
-}
-
-fn format_timestamp(ts: f64) -> String {
-    if ts == 0.0 {
-        return "unknown time         ".to_string();
-    }
-    // Use libc to format the timestamp without pulling in chrono
-    let secs = ts as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&secs, &mut tm) };
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec,
-    )
 }
