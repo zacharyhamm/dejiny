@@ -64,6 +64,8 @@ The search UI supports:
 
 Each result shows the exit code, a recording indicator, the command, the working directory, and how long ago it ran.
 
+The command is the highest-priority column: as the window narrows, the other columns are dropped around it (id first, then the working directory, then the elapsed time) so the command always stays visible. A command that still doesn't fit is marked with a trailing `…`, and the selected row's full text appears in a `full command` pane below the list (a command too tall even for that pane is clipped, and the pane's title is marked with `…`).
+
 ## Replaying sessions
 
 Replay a specific recording by its database ID:

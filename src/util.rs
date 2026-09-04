@@ -93,6 +93,34 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
+/// Shorten `s` to at most `max_width` display cells, keeping the tail and
+/// prefixing an ellipsis. Returns `s` unchanged when it already fits. Unlike
+/// `truncate_to_width`, this does not pad.
+pub fn elide_start_to_width(s: &str, max_width: usize) -> String {
+    if unicode_width::UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    // Reserve one cell for the leading ellipsis.
+    let budget = max_width - 1;
+    let mut width = 0;
+    let mut start = s.len();
+    for (i, c) in s.char_indices().rev() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + w > budget {
+            break;
+        }
+        width += w;
+        start = i;
+    }
+    let mut out = String::with_capacity(s.len() - start + '\u{2026}'.len_utf8());
+    out.push('\u{2026}');
+    out.push_str(&s[start..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +193,43 @@ mod tests {
     #[test]
     fn format_duration_negative() {
         assert_eq!(format_duration(-1.0), "0ms");
+    }
+
+    #[test]
+    fn elide_start_fits_unchanged() {
+        assert_eq!(elide_start_to_width("~/dejiny", 20), "~/dejiny");
+        assert_eq!(elide_start_to_width("~/dejiny", 8), "~/dejiny");
+        assert_eq!(elide_start_to_width("", 0), "");
+    }
+
+    #[test]
+    fn elide_start_keeps_tail() {
+        assert_eq!(elide_start_to_width("/a/very/deep/path/src", 10), "\u{2026}/path/src");
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(
+                elide_start_to_width("/a/very/deep/path/src", 10).as_str()
+            ),
+            10
+        );
+    }
+
+    #[test]
+    fn elide_start_tiny_widths() {
+        assert_eq!(elide_start_to_width("~/dejiny", 0), "");
+        assert_eq!(elide_start_to_width("~/dejiny", 1), "\u{2026}");
+        assert_eq!(elide_start_to_width("~/dejiny", 2), "\u{2026}y");
+    }
+
+    #[test]
+    fn elide_start_wide_chars() {
+        // Each CJK char is 2 cells; a 3-cell budget fits the ellipsis plus one.
+        let s = "\u{4f60}\u{597d}\u{4e16}\u{754c}";
+        let out = elide_start_to_width(s, 3);
+        assert_eq!(out, "\u{2026}\u{754c}");
+        // Never exceeds the budget, even when a wide char straddles the boundary.
+        for max in 0..=10 {
+            let w = unicode_width::UnicodeWidthStr::width(elide_start_to_width(s, max).as_str());
+            assert!(w <= max, "width {w} exceeded max {max}");
+        }
     }
 }
